@@ -1,0 +1,78 @@
+# CertChain: full local environment with one command
+#   docker compose up --build
+# then open http://localhost:3000
+#
+# The local Hardhat node keeps its state in memory, so the database is also
+# recreated on every start. This keeps the blockchain and the database in sync.
+
+services:
+  blockchain:
+    build: ./contracts
+    ports:
+      - "8545:8545"
+    healthcheck:
+      # Uses Node and 127.0.0.1 (not localhost): in Alpine, localhost may resolve to IPv6
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8545',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',method:'eth_blockNumber',params:[],id:1})}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      start_period: 30s
+      retries: 40
+
+  deployer:
+    build: ./contracts
+    command: ["npx", "hardhat", "run", "scripts/deploy.ts", "--network", "localhost"]
+    environment:
+      RPC_URL: http://blockchain:8545
+      DEPLOYMENTS_DIR: /deployments
+    volumes:
+      - deployments:/deployments
+    depends_on:
+      blockchain:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: certchain
+      POSTGRES_PASSWORD: certchain
+      POSTGRES_DB: certchain
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U certchain"]
+      interval: 3s
+      retries: 30
+
+  backend:
+    build: ./backend
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://certchain:certchain@postgres:5432/certchain
+      RPC_URL: http://blockchain:8545
+      DEPLOYMENT_FILE: /deployments/localhost.json
+      JWT_SECRET: ${JWT_SECRET:-change-this-jwt-secret-at-least-32-characters}
+      KEY_ENCRYPTION_SECRET: ${KEY_ENCRYPTION_SECRET:-change-this-key-encryption-secret}
+      LOG_SALT: ${LOG_SALT:-change-this-salt}
+      ADMIN_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      PUBLIC_APP_URL: http://localhost:3000
+      CORS_ORIGIN: http://localhost:3000
+      SEED_DEMO: "true"
+    volumes:
+      - deployments:/deployments:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      deployer:
+        condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  deployments:
